@@ -1,0 +1,22 @@
+version: 2
+
+builds:
+  - binary: bm
+    goos: [darwin]
+    goarch: [amd64, arm64]
+    ldflags:
+      - -s -w
+
+archives:
+  - formats: [tar.gz]
+
+brews:
+  - repository:
+      owner: martensjostrand
+      name: homebrew-tap
+    directory: Formula
+    description: "CLI tool for searching and opening bookmarks"
+    homepage: "https://github.com/martensjostrand/bookmark"
+
+changelog:
+  sort: asc
