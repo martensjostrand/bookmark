@@ -6,12 +6,12 @@ import (
 	"io"
 	"os"
 	"os/exec"
-	"regexp"
-	"os/signal"
 	"path/filepath"
-	"strconv"
+	"regexp"
+	"sort"
 	"strings"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/charmbracelet/x/term"
 	"github.com/sahilm/fuzzy"
@@ -23,15 +23,35 @@ type bookmark struct {
 	command     string // e.g. "tpo" from a "!tpo" prefix
 }
 
+// selectedBg is the highlight bar behind the cursor row. Every style used on
+// that row repeats it, so the bar stays unbroken across styled segments.
+var selectedBg = lipgloss.AdaptiveColor{Light: "153", Dark: "24"}
+
 var (
 	numberStyle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("3"))
 	dimStyle    = lipgloss.NewStyle().Faint(true)
 	boldStyle   = lipgloss.NewStyle().Bold(true)
+
+	// matchStyle picks out the fuzzy-matched characters.
+	matchStyle = lipgloss.NewStyle().Bold(true).
+			Foreground(lipgloss.AdaptiveColor{Light: "5", Dark: "13"})
+
+	selectedStyle = lipgloss.NewStyle().Background(selectedBg)
+	selectedNum   = numberStyle.Background(selectedBg)
+	selectedMatch = matchStyle.Background(selectedBg)
 )
 
 func highlightMatches(text string, matchedIndexes []int) string {
+	return highlightMatchesWith(text, matchedIndexes, lipgloss.NewStyle(), matchStyle)
+}
+
+// highlightMatchesWith renders text with the matched characters picked out.
+// Both styles are passed in so a selected row can carry its background colour
+// through every segment — a style that omitted it would emit a reset and punch
+// a hole in the highlight bar.
+func highlightMatchesWith(text string, matchedIndexes []int, base, hit lipgloss.Style) string {
 	if len(matchedIndexes) == 0 {
-		return text
+		return base.Render(text)
 	}
 	matched := make(map[int]bool, len(matchedIndexes))
 	for _, idx := range matchedIndexes {
@@ -48,14 +68,14 @@ func highlightMatches(text string, matchedIndexes []int) string {
 				run = append(run, runes[i])
 				i++
 			}
-			sb.WriteString(boldStyle.Render(string(run)))
+			sb.WriteString(hit.Render(string(run)))
 		} else {
 			var run []rune
 			for i < len(runes) && !matched[i] {
 				run = append(run, runes[i])
 				i++
 			}
-			sb.WriteString(string(run))
+			sb.WriteString(base.Render(string(run)))
 		}
 	}
 	return sb.String()
@@ -92,11 +112,33 @@ func parseBookmarks(r io.Reader) []bookmark {
 
 type bookmarkSource []bookmark
 
-func (b bookmarkSource) String(i int) string {
-	if b[i].description != "" {
-		return strings.ToLower(b[i].description)
+// displayText is what the UI shows for a bookmark, and the coordinate space
+// its matchedIndexes refer to.
+func (b bookmark) displayText() string {
+	if b.description != "" {
+		return b.description
 	}
-	return strings.ToLower(b[i].url)
+	return b.url
+}
+
+// searchOffset is how far displayText sits into the string actually matched
+// against. Matched indexes must be shifted back by this much before they can
+// highlight the displayed text.
+func (b bookmark) searchOffset() int {
+	if b.command == "" {
+		return 0
+	}
+	return len(b.command) + 1
+}
+
+// String prefixes the command keyword so that "lto" ranks its own bookmark,
+// and keeps helping in longer queries like "lt prod".
+func (b bookmarkSource) String(i int) string {
+	text := b[i].displayText()
+	if b[i].command != "" {
+		text = b[i].command + " " + text
+	}
+	return strings.ToLower(text)
 }
 
 func (b bookmarkSource) Len() int {
@@ -118,26 +160,98 @@ type searchResult struct {
 	matchedIndexes []int
 }
 
+// search matches each whitespace-separated term independently, so term order
+// does not affect the outcome: "logs prod alpha" and "logs alpha prod" return the
+// same bookmarks in the same order. A bookmark must match every term.
 func search(bookmarks []bookmark, query string) []searchResult {
-	matches := fuzzy.FindFrom(strings.ToLower(query), bookmarkSource(bookmarks))
-	var results []searchResult
-	for _, m := range matches {
+	terms := strings.Fields(strings.ToLower(query))
+	if len(terms) == 0 {
+		// No query is no filter: show everything, in file order.
+		results := make([]searchResult, 0, len(bookmarks))
+		for _, b := range bookmarks {
+			results = append(results, searchResult{bookmark: b})
+		}
+		return results
+	}
+
+	src := bookmarkSource(bookmarks)
+	type accumulator struct {
+		bonus   int // score with fuzzy's per-call length penalty backed out
+		matched int // number of characters matched across all terms
+		indexes []int
+	}
+	current := make(map[int]*accumulator)
+	for i, term := range terms {
+		next := make(map[int]*accumulator)
+		for _, m := range fuzzy.FindFrom(term, src) {
+			// fuzzy charges len(MatchedIndexes)-len(str) once per call.
+			// Summing raw scores would charge it once per term, letting
+			// candidate length outweigh match quality. Back it out here and
+			// apply it a single time below.
+			bonus := m.Score - (len(m.MatchedIndexes) - len(src.String(m.Index)))
+			if i == 0 {
+				next[m.Index] = &accumulator{
+					bonus:   bonus,
+					matched: len(m.MatchedIndexes),
+					indexes: m.MatchedIndexes,
+				}
+				continue
+			}
+			if prev, ok := current[m.Index]; ok {
+				next[m.Index] = &accumulator{
+					bonus:   prev.bonus + bonus,
+					matched: prev.matched + len(m.MatchedIndexes),
+					indexes: append(prev.indexes, m.MatchedIndexes...),
+				}
+			}
+		}
+		current = next
+		if len(current) == 0 {
+			return nil
+		}
+	}
+
+	scores := make(map[int]int, len(current))
+	indexes := make([]int, 0, len(current))
+	for idx, a := range current {
+		scores[idx] = a.bonus - (len(src.String(idx)) - a.matched)
+		indexes = append(indexes, idx)
+	}
+	// Best score first, falling back to file order so output stays stable.
+	sort.Slice(indexes, func(i, j int) bool {
+		a, b := indexes[i], indexes[j]
+		if scores[a] != scores[b] {
+			return scores[a] > scores[b]
+		}
+		return a < b
+	})
+
+	results := make([]searchResult, 0, len(indexes))
+	for _, idx := range indexes {
 		results = append(results, searchResult{
-			bookmark:       bookmarks[m.Index],
-			matchedIndexes: m.MatchedIndexes,
+			bookmark:       bookmarks[idx],
+			matchedIndexes: displayIndexes(bookmarks[idx], current[idx].indexes),
 		})
 	}
 	return results
 }
 
-func terminalWidth() int {
-	w, _, err := term.GetSize(os.Stdout.Fd())
-	if err != nil {
-		return 80
+// displayIndexes shifts matched indexes out of the keyword-prefixed search
+// string and into the displayed text, dropping those that landed on the
+// keyword itself since it is never rendered.
+func displayIndexes(b bookmark, matched []int) []int {
+	offset := b.searchOffset()
+	if offset == 0 {
+		return matched
 	}
-	return w
+	out := make([]int, 0, len(matched))
+	for _, idx := range matched {
+		if idx >= offset {
+			out = append(out, idx-offset)
+		}
+	}
+	return out
 }
-
 func hostEndIndex(url string) int {
 	schemeEnd := strings.Index(url, "://")
 	if schemeEnd == -1 {
@@ -222,26 +336,6 @@ func formatURL(url string, maxWidth int) string {
 	return indent + dimStyle.Render(prefix+before) + boldStyle.Render(paramText) + dimStyle.Render(after+suffix)
 }
 
-func formatResults(results []searchResult, width int) string {
-	var sb strings.Builder
-	for i, r := range results {
-		num := numberStyle.Render(fmt.Sprintf("%d", i+1))
-		sep := dimStyle.Render(")")
-
-		var text string
-		if r.bookmark.description != "" {
-			text = highlightMatches(r.bookmark.description, r.matchedIndexes)
-		} else {
-			text = highlightMatches(r.bookmark.url, r.matchedIndexes)
-		}
-
-		fmt.Fprintf(&sb, "%s%s %s\n", num, sep, text)
-		sb.WriteString(formatURL(r.bookmark.url, width))
-		sb.WriteString("\n\n")
-	}
-	return sb.String()
-}
-
 var paramRegexp = regexp.MustCompile(`\{([^}]+)\}`)
 
 func parameterName(url string) string {
@@ -260,19 +354,6 @@ func resolveURL(url, arg string) string {
 	return paramRegexp.ReplaceAllLiteralString(url, arg)
 }
 
-func parseSelection(input string) (int, string) {
-	parts := strings.SplitN(input, " ", 2)
-	n, err := strconv.Atoi(parts[0])
-	if err != nil {
-		return 0, ""
-	}
-	arg := ""
-	if len(parts) == 2 {
-		arg = strings.TrimSpace(parts[1])
-	}
-	return n, arg
-}
-
 func loadBookmarksFile() ([]bookmark, error) {
 	home, err := os.UserHomeDir()
 	if err != nil {
@@ -287,15 +368,6 @@ func loadBookmarksFile() ([]bookmark, error) {
 }
 
 func main() {
-	// Clean exit on ctrl-c
-	sig := make(chan os.Signal, 1)
-	signal.Notify(sig, os.Interrupt)
-	go func() {
-		<-sig
-		fmt.Println()
-		os.Exit(0)
-	}()
-
 	bookmarks, err := loadBookmarksFile()
 	if err != nil {
 		fmt.Fprintln(os.Stderr, "Could not open ~/.bookmarks")
@@ -308,78 +380,37 @@ func main() {
 		os.Exit(1)
 	}
 
-	scanner := bufio.NewScanner(os.Stdin)
-	query := strings.Join(os.Args[1:], " ")
-
-	// Check for command match on first arg
-	if len(os.Args) >= 2 {
-		if cmd := findCommand(bookmarks, os.Args[1]); cmd != nil {
-			url := cmd.url
-			arg := strings.TrimSpace(strings.Join(os.Args[2:], " "))
-			if hasParameter(url) {
-				if arg == "" {
-					fmt.Printf("Enter %s: ", parameterName(url))
-					if !scanner.Scan() {
-						return
-					}
-					arg = strings.TrimSpace(scanner.Text())
-				}
-				url = resolveURL(url, arg)
-			}
-			if err := exec.Command("open", url).Start(); err != nil {
-				fmt.Fprintf(os.Stderr, "Failed to open URL: %v\n", err)
-				os.Exit(1)
-			}
-			return
-		}
+	if !term.IsTerminal(os.Stdin.Fd()) {
+		fmt.Fprintln(os.Stderr, "bm requires an interactive terminal")
+		os.Exit(1)
 	}
 
-	for {
-		// Get query if not provided
-		for query == "" {
-			fmt.Print("Search: ")
-			if !scanner.Scan() {
-				return
-			}
-			query = strings.TrimSpace(scanner.Text())
-		}
-
-		results := search(bookmarks, query)
-		if len(results) == 0 {
-			fmt.Println("No matches")
-			query = ""
-			continue
-		}
-
-		fmt.Print(formatResults(results, terminalWidth()))
-
-		// Selection loop
-		for {
-			fmt.Print("\nWhere to go? ")
-			if !scanner.Scan() {
-				return
-			}
-			input := strings.TrimSpace(scanner.Text())
-			n, arg := parseSelection(input)
-			if n < 1 || n > len(results) {
-				continue
-			}
-			url := results[n-1].bookmark.url
-			if hasParameter(url) {
-				if arg == "" {
-					fmt.Printf("Enter %s: ", parameterName(url))
-					if !scanner.Scan() {
-						return
-					}
-					arg = strings.TrimSpace(scanner.Text())
-				}
-				url = resolveURL(url, arg)
-			}
-			if err := exec.Command("open", url).Start(); err != nil {
-				fmt.Fprintf(os.Stderr, "Failed to open URL: %v\n", err)
-				os.Exit(1)
-			}
-			return
-		}
+	final, err := tea.NewProgram(initialModel(bookmarks, initialQuery(bookmarks, os.Args[1:]))).Run()
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "%v\n", err)
+		os.Exit(1)
 	}
+
+	// Open only once the terminal has been restored.
+	m, ok := final.(model)
+	if !ok || m.chosen == "" {
+		return
+	}
+	if err := exec.Command("open", m.chosen).Start(); err != nil {
+		fmt.Fprintf(os.Stderr, "Failed to open URL: %v\n", err)
+		os.Exit(1)
+	}
+}
+
+// initialQuery prefills the search box from the command line. A leading
+// command keyword stands alone: "bm lto nginx" searches for "lto", and the
+// service name is retyped at the parameter prompt.
+func initialQuery(bookmarks []bookmark, args []string) string {
+	if len(args) == 0 {
+		return ""
+	}
+	if findCommand(bookmarks, args[0]) != nil {
+		return args[0]
+	}
+	return strings.Join(args, " ")
 }

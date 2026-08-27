@@ -1,6 +1,7 @@
 package main
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 )
@@ -130,43 +131,6 @@ func TestResolveURLNoParameter(t *testing.T) {
 	}
 }
 
-func TestParseSelection(t *testing.T) {
-	n, arg := parseSelection("2 SE0000108656")
-	if n != 2 {
-		t.Errorf("expected selection 2, got %d", n)
-	}
-	if arg != "SE0000108656" {
-		t.Errorf("expected arg 'SE0000108656', got '%s'", arg)
-	}
-}
-
-func TestParseSelectionNoArg(t *testing.T) {
-	n, arg := parseSelection("3")
-	if n != 3 {
-		t.Errorf("expected selection 3, got %d", n)
-	}
-	if arg != "" {
-		t.Errorf("expected empty arg, got '%s'", arg)
-	}
-}
-
-func TestParseSelectionTrimArg(t *testing.T) {
-	n, arg := parseSelection("2  SE0000108656  ")
-	if n != 2 {
-		t.Errorf("expected selection 2, got %d", n)
-	}
-	if arg != "SE0000108656" {
-		t.Errorf("expected arg 'SE0000108656', got '%s'", arg)
-	}
-}
-
-func TestParseSelectionInvalid(t *testing.T) {
-	n, _ := parseSelection("abc")
-	if n != 0 {
-		t.Errorf("expected 0 for invalid input, got %d", n)
-	}
-}
-
 func TestSearchMatchesOnDescriptionOnly(t *testing.T) {
 	bookmarks := []bookmark{
 		{url: "https://example.com/boards/1629", description: "board jira"},
@@ -288,24 +252,6 @@ func TestHighlightMatchesEmpty(t *testing.T) {
 	}
 }
 
-func TestFormatResults(t *testing.T) {
-	results := []searchResult{
-		{bookmark: bookmark{url: "https://example.com/help", description: "Description about example"}, matchedIndexes: nil},
-		{bookmark: bookmark{url: "https://example.net", description: ""}, matchedIndexes: nil},
-	}
-
-	output := formatResults(results, 80)
-	if !strings.Contains(output, "Description about example") {
-		t.Error("expected description in output")
-	}
-	if !strings.Contains(output, "https://example.com/help") {
-		t.Error("expected URL shown below description")
-	}
-	if !strings.Contains(output, "https://example.net") {
-		t.Error("expected URL in output when no description")
-	}
-}
-
 func TestTruncateMiddle(t *testing.T) {
 	short := "https://example.com"
 	if truncateMiddle(short, 80) != short {
@@ -361,5 +307,169 @@ func TestFormatURLShortWithParam(t *testing.T) {
 	}
 	if !strings.Contains(result, "https://example.com/") {
 		t.Error("expected full URL when it fits")
+	}
+}
+
+func descriptions(results []searchResult) []string {
+	out := make([]string, 0, len(results))
+	for _, r := range results {
+		out = append(out, r.bookmark.description)
+	}
+	return out
+}
+
+var orderBookmarks = []bookmark{
+	{url: "https://logs.example.com/logs?p=prod", description: "logs prod alpha cloud"},
+	{url: "https://logs.example.com/logs?p=test", description: "logs test alpha cloud"},
+	{url: "https://logs.example.com/logs?p=prod-legacy", description: "logs prod legacy datacenter"},
+	{url: "https://admin.example.com/prod", description: "Billing manager admin prod"},
+	{url: "https://admin-billing.example.com/prod", description: "Admin billing admin-billing prod"},
+}
+
+func TestSearchTermOrderDoesNotMatter(t *testing.T) {
+	results := search(orderBookmarks, "logs alpha prod")
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d: %v", len(results), descriptions(results))
+	}
+	if results[0].bookmark.description != "logs prod alpha cloud" {
+		t.Errorf("got %q", results[0].bookmark.description)
+	}
+}
+
+func TestSearchTermOrderSameRanking(t *testing.T) {
+	permutations := []string{
+		"logs prod alpha",
+		"logs alpha prod",
+		"alpha prod logs",
+		"prod alpha logs",
+	}
+	want := descriptions(search(orderBookmarks, permutations[0]))
+	if len(want) == 0 {
+		t.Fatal("expected the baseline permutation to match something")
+	}
+	for _, query := range permutations[1:] {
+		got := descriptions(search(orderBookmarks, query))
+		if !reflect.DeepEqual(got, want) {
+			t.Errorf("query %q gave %v, want %v", query, got, want)
+		}
+	}
+}
+
+func TestSearchRequiresEveryTerm(t *testing.T) {
+	results := search(orderBookmarks, "logs zzzznotfound")
+	if len(results) != 0 {
+		t.Fatalf("expected 0 results, got %d: %v", len(results), descriptions(results))
+	}
+}
+
+func TestSearchHighlightsAllTerms(t *testing.T) {
+	bookmarks := []bookmark{
+		{url: "https://example.com", description: "logs prod alpha cloud"},
+	}
+	results := search(bookmarks, "alpha logs")
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	matched := map[int]bool{}
+	for _, idx := range results[0].matchedIndexes {
+		matched[idx] = true
+	}
+	// "logs" occupies 0-3, "alpha" occupies 10-12.
+	for _, idx := range []int{0, 1, 2, 3, 10, 11, 12} {
+		if !matched[idx] {
+			t.Errorf("index %d not highlighted, got %v", idx, results[0].matchedIndexes)
+		}
+	}
+}
+
+func TestSearchIgnoresSurplusWhitespace(t *testing.T) {
+	want := descriptions(search(orderBookmarks, "logs prod"))
+	got := descriptions(search(orderBookmarks, "  logs \t  prod  "))
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v", got, want)
+	}
+}
+
+// Scoring charges the length penalty once per query, not once per term, so a
+// longer description whose terms all land on word boundaries still beats a
+// shorter one that only matches mid-word.
+func TestSearchDoesNotRankOnLengthAlone(t *testing.T) {
+	bookmarks := []bookmark{
+		{url: "https://example.com/a", description: "backlog approved"},
+		{url: "https://example.com/b", description: "log server prod region eu"},
+	}
+	got := descriptions(search(bookmarks, "log prod"))
+	want := []string{"log server prod region eu", "backlog approved"}
+	if !reflect.DeepEqual(got, want) {
+		t.Errorf("got %v, want %v (the longer, better-placed match should win)", got, want)
+	}
+}
+
+var commandBookmarks = []bookmark{
+	{command: "lt", url: "https://logs.example.com/test?s={service}", description: "logs test alpha cloud"},
+	{command: "lto", url: "https://logs.example.com/test-legacy?s={service}", description: "logs test legacy datacenter"},
+	{command: "lp", url: "https://logs.example.com/prod?s={service}", description: "logs prod alpha cloud"},
+	{command: "board", url: "https://tracker.example.com/board", description: "issue board"},
+}
+
+func TestSearchExactKeywordRanksFirst(t *testing.T) {
+	for _, keyword := range []string{"lt", "lto", "lp", "board"} {
+		results := search(commandBookmarks, keyword)
+		if len(results) == 0 {
+			t.Errorf("%q matched nothing", keyword)
+			continue
+		}
+		if results[0].bookmark.command != keyword {
+			t.Errorf("%q ranked !%s first, want !%s",
+				keyword, results[0].bookmark.command, keyword)
+		}
+	}
+}
+
+func TestSearchKeywordHelpsMidQuery(t *testing.T) {
+	// "cloud" alone matches both !lt and !lp; the keyword breaks the tie.
+	results := search(commandBookmarks, "lp cloud")
+	if len(results) == 0 {
+		t.Fatal("expected a match")
+	}
+	if results[0].bookmark.command != "lp" {
+		t.Errorf("got !%s first, want !lp", results[0].bookmark.command)
+	}
+}
+
+func TestSearchIndexesAreDisplayRelative(t *testing.T) {
+	results := search(commandBookmarks, "lto legacy")
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	r := results[0]
+	if len(r.matchedIndexes) == 0 {
+		t.Fatal("expected some highlighted characters")
+	}
+	for _, idx := range r.matchedIndexes {
+		if idx < 0 || idx >= len(r.bookmark.description) {
+			t.Errorf("index %d outside %q (len %d)",
+				idx, r.bookmark.description, len(r.bookmark.description))
+		}
+	}
+}
+
+// A short description with a long keyword is where un-offset indexes would
+// run past the end of the rendered text.
+func TestSearchIndexesStayInsideShortDescription(t *testing.T) {
+	results := search(commandBookmarks, "board")
+	if len(results) == 0 {
+		t.Fatal("expected a match")
+	}
+	r := results[0]
+	for _, idx := range r.matchedIndexes {
+		if idx < 0 || idx >= len(r.bookmark.description) {
+			t.Errorf("index %d outside %q (len %d)",
+				idx, r.bookmark.description, len(r.bookmark.description))
+		}
+	}
+	// highlightMatches indexes by rune, so it must not panic or drop text.
+	if got := highlightMatches(r.bookmark.description, r.matchedIndexes); got == "" {
+		t.Error("highlight produced empty output")
 	}
 }
