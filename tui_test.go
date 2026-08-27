@@ -315,3 +315,40 @@ func TestMatchedCharactersAreColoured(t *testing.T) {
 		t.Errorf("styling changed the text: %q", hit)
 	}
 }
+
+func TestParamStageShowsSelection(t *testing.T) {
+	m := initialModel(tuiBookmarks, "lp")
+	m, _ = send(t, m, tea.WindowSizeMsg{Width: 60, Height: 12})
+	selected := m.results[m.cursor].bookmark
+	m, _ = send(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+
+	view := m.View()
+	if !strings.Contains(view, selected.description) {
+		t.Errorf("parameter stage lost the selected bookmark:\n%s", view)
+	}
+	if !strings.Contains(view, "Enter service:") {
+		t.Errorf("parameter prompt missing:\n%s", view)
+	}
+	if !strings.Contains(view, "esc back") {
+		t.Errorf("esc hint missing:\n%s", view)
+	}
+	// The other results are gone; only the selection remains.
+	for _, r := range m.results {
+		if d := r.bookmark.description; d != selected.description && strings.Contains(view, d) {
+			t.Errorf("unselected result %q still shown:\n%s", d, view)
+		}
+	}
+}
+
+func TestParamStageRowMatchesListRow(t *testing.T) {
+	// The row must render identically either side of the transition, so the
+	// list looks like it collapses onto the selection.
+	m := initialModel(tuiBookmarks, "lp")
+	m, _ = send(t, m, tea.WindowSizeMsg{Width: 60, Height: 12})
+	before := m.resultRow(m.cursor)
+
+	m, _ = send(t, m, tea.KeyMsg{Type: tea.KeyEnter})
+	if after := m.resultRow(m.cursor); after != before {
+		t.Errorf("row changed across the transition:\n before %q\n after  %q", before, after)
+	}
+}

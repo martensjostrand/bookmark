@@ -187,9 +187,33 @@ func padRow(row string, width int) string {
 	return row
 }
 
+// resultRow renders one result. The cursor row carries the highlight bar and
+// is followed by its URL, so the parameter stage can reuse it verbatim and the
+// list appears to collapse onto the selection rather than being replaced.
+func (m model) resultRow(i int) string {
+	r := m.results[i]
+	n := fmt.Sprintf("%2d", i+1)
+	desc := r.bookmark.displayText()
+
+	if i != m.cursor {
+		return "  " + numberStyle.Render(n) + " " +
+			highlightMatchesWith(desc, r.matchedIndexes, lipgloss.NewStyle(), matchStyle)
+	}
+	row := selectedStyle.Render("▸ ") + selectedNum.Render(n) + selectedStyle.Render(" ") +
+		highlightMatchesWith(desc, r.matchedIndexes, selectedStyle, selectedMatch)
+	return padRow(row, m.width) + "\n" + formatURL(r.bookmark.url, m.width)
+}
+
 func (m model) View() string {
 	if m.stage == stageParam {
-		return m.input.View() + "\n" + m.paramInput.View() + "\n"
+		var sb strings.Builder
+		sb.WriteString(m.input.View() + "\n")
+		if len(m.results) > 0 {
+			sb.WriteString(m.resultRow(m.cursor) + "\n")
+		}
+		sb.WriteString(m.paramInput.View() + "\n")
+		sb.WriteString(helpStyle.Render("  enter open · esc back") + "\n")
+		return sb.String()
 	}
 
 	var sb strings.Builder
@@ -207,19 +231,7 @@ func (m model) View() string {
 		end = len(m.results)
 	}
 	for i := m.offset; i < end; i++ {
-		r := m.results[i]
-		n := fmt.Sprintf("%2d", i+1)
-		desc := r.bookmark.displayText()
-
-		if i == m.cursor {
-			row := selectedStyle.Render("▸ ") + selectedNum.Render(n) + selectedStyle.Render(" ") +
-				highlightMatchesWith(desc, r.matchedIndexes, selectedStyle, selectedMatch)
-			sb.WriteString(padRow(row, m.width) + "\n")
-			sb.WriteString(formatURL(r.bookmark.url, m.width) + "\n")
-		} else {
-			sb.WriteString("  " + numberStyle.Render(n) + " " +
-				highlightMatchesWith(desc, r.matchedIndexes, lipgloss.NewStyle(), matchStyle) + "\n")
-		}
+		sb.WriteString(m.resultRow(i) + "\n")
 	}
 
 	sb.WriteString(helpStyle.Render(fmt.Sprintf(
