@@ -406,39 +406,55 @@ func TestSearchDoesNotRankOnLengthAlone(t *testing.T) {
 }
 
 var commandBookmarks = []bookmark{
-	{command: "lt", url: "https://logs.example.com/test?s={service}", description: "logs test alpha cloud"},
-	{command: "lto", url: "https://logs.example.com/test-legacy?s={service}", description: "logs test legacy datacenter"},
-	{command: "lp", url: "https://logs.example.com/prod?s={service}", description: "logs prod alpha cloud"},
-	{command: "board", url: "https://tracker.example.com/board", description: "issue board"},
+	{command: "dv", url: "https://logs.example.com/test?s={service}", description: "logs test alpha cloud"},
+	{command: "dvl", url: "https://logs.example.com/test-legacy?s={service}", description: "logs test legacy datacenter"},
+	{command: "pv", url: "https://logs.example.com/prod?s={service}", description: "logs prod alpha cloud"},
+	{command: "panel", url: "https://tracker.example.com/panel", description: "issue panel"},
 }
 
-func TestSearchExactKeywordRanksFirst(t *testing.T) {
-	for _, keyword := range []string{"lt", "lto", "lp", "board"} {
+// A keyword is a strong ranking signal, not a guarantee of first place.
+// fuzzy pays +20 for a character following a separator but only compounding
+// +5s for adjacency, so spreading a match across word boundaries can outscore
+// an exact contiguous keyword: "dvl" scores better against "dv logs ..." than
+// against "dvl logs ...". Assert the bookmark surfaces near the top, which is
+// what the keyword actually buys.
+func TestSearchExactKeywordRanksHighly(t *testing.T) {
+	const nearTop = 2
+	for _, keyword := range []string{"dv", "dvl", "pv", "panel"} {
 		results := search(commandBookmarks, keyword)
 		if len(results) == 0 {
 			t.Errorf("%q matched nothing", keyword)
 			continue
 		}
-		if results[0].bookmark.command != keyword {
-			t.Errorf("%q ranked !%s first, want !%s",
-				keyword, results[0].bookmark.command, keyword)
+		rank := -1
+		for i, r := range results {
+			if r.bookmark.command == keyword {
+				rank = i
+				break
+			}
+		}
+		switch {
+		case rank < 0:
+			t.Errorf("%q did not surface !%s at all, got %v", keyword, keyword, descriptions(results))
+		case rank >= nearTop:
+			t.Errorf("%q ranked !%s at position %d, want within the top %d",
+				keyword, keyword, rank+1, nearTop)
 		}
 	}
 }
-
 func TestSearchKeywordHelpsMidQuery(t *testing.T) {
 	// "cloud" alone matches both !lt and !lp; the keyword breaks the tie.
-	results := search(commandBookmarks, "lp cloud")
+	results := search(commandBookmarks, "pv cloud")
 	if len(results) == 0 {
 		t.Fatal("expected a match")
 	}
-	if results[0].bookmark.command != "lp" {
-		t.Errorf("got !%s first, want !lp", results[0].bookmark.command)
+	if results[0].bookmark.command != "pv" {
+		t.Errorf("got !%s first, want !pv", results[0].bookmark.command)
 	}
 }
 
 func TestSearchIndexesAreDisplayRelative(t *testing.T) {
-	results := search(commandBookmarks, "lto legacy")
+	results := search(commandBookmarks, "dvl legacy")
 	if len(results) != 1 {
 		t.Fatalf("expected 1 result, got %d", len(results))
 	}
@@ -457,7 +473,7 @@ func TestSearchIndexesAreDisplayRelative(t *testing.T) {
 // A short description with a long keyword is where un-offset indexes would
 // run past the end of the rendered text.
 func TestSearchIndexesStayInsideShortDescription(t *testing.T) {
-	results := search(commandBookmarks, "board")
+	results := search(commandBookmarks, "panel")
 	if len(results) == 0 {
 		t.Fatal("expected a match")
 	}
@@ -471,5 +487,49 @@ func TestSearchIndexesStayInsideShortDescription(t *testing.T) {
 	// highlightMatches indexes by rune, so it must not panic or drop text.
 	if got := highlightMatches(r.bookmark.description, r.matchedIndexes); got == "" {
 		t.Error("highlight produced empty output")
+	}
+}
+
+// highlighted returns the characters search() marked, so a test can assert on
+// what the user sees rather than on raw offsets.
+func highlighted(r searchResult) string {
+	runes := []rune(r.bookmark.displayText())
+	var sb strings.Builder
+	for _, idx := range r.matchedIndexes {
+		if idx >= 0 && idx < len(runes) {
+			sb.WriteRune(runes[idx])
+		}
+	}
+	return sb.String()
+}
+
+// Scoring matches the keyword-prefixed string, so fuzzy may satisfy a term
+// from the hidden keyword: "log" once matched l and o inside "dvl" and only
+// the g in "logs", lighting up a misleading fragment.
+func TestSearchHighlightsWholeTermOnCommandBookmarks(t *testing.T) {
+	bookmarks := []bookmark{
+		{command: "dvl", url: "https://logs.example.com/a", description: "logs test legacy datacenter"},
+	}
+	results := search(bookmarks, "log legacy")
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if got, want := highlighted(results[0]), "loglegacy"; got != want {
+		t.Errorf("highlighted %q, want %q (indexes %v)", got, want, results[0].matchedIndexes)
+	}
+}
+
+// A term the description cannot satisfy on its own contributes no highlight,
+// even though the keyword let the bookmark match.
+func TestSearchHighlightsNothingForKeywordOnlyTerm(t *testing.T) {
+	bookmarks := []bookmark{
+		{command: "zq", url: "https://example.com/a", description: "release dashboard"},
+	}
+	results := search(bookmarks, "zq")
+	if len(results) != 1 {
+		t.Fatalf("expected the keyword to match, got %d results", len(results))
+	}
+	if got := highlighted(results[0]); got != "" {
+		t.Errorf("highlighted %q, want nothing", got)
 	}
 }

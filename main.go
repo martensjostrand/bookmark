@@ -121,18 +121,8 @@ func (b bookmark) displayText() string {
 	return b.url
 }
 
-// searchOffset is how far displayText sits into the string actually matched
-// against. Matched indexes must be shifted back by this much before they can
-// highlight the displayed text.
-func (b bookmark) searchOffset() int {
-	if b.command == "" {
-		return 0
-	}
-	return len(b.command) + 1
-}
-
-// String prefixes the command keyword so that "lto" ranks its own bookmark,
-// and keeps helping in longer queries like "lt prod".
+// String prefixes the command keyword so that "dvl" ranks its own bookmark,
+// and keeps helping in longer queries like "dvl prod".
 func (b bookmarkSource) String(i int) string {
 	text := b[i].displayText()
 	if b[i].command != "" {
@@ -230,24 +220,24 @@ func search(bookmarks []bookmark, query string) []searchResult {
 	for _, idx := range indexes {
 		results = append(results, searchResult{
 			bookmark:       bookmarks[idx],
-			matchedIndexes: displayIndexes(bookmarks[idx], current[idx].indexes),
+			matchedIndexes: displayIndexes(bookmarks[idx], terms),
 		})
 	}
 	return results
 }
 
-// displayIndexes shifts matched indexes out of the keyword-prefixed search
-// string and into the displayed text, dropping those that landed on the
-// keyword itself since it is never rendered.
-func displayIndexes(b bookmark, matched []int) []int {
-	offset := b.searchOffset()
-	if offset == 0 {
-		return matched
-	}
-	out := make([]int, 0, len(matched))
-	for _, idx := range matched {
-		if idx >= offset {
-			out = append(out, idx-offset)
+// displayIndexes recomputes which characters to highlight against the text
+// actually rendered. Scoring matches the keyword-prefixed string so that "dvl"
+// ranks its own bookmark, but fuzzy is then free to satisfy a term using the
+// hidden keyword — "log" can match l and o inside "dvl" and only g in "logs".
+// Translating those positions would light up a misleading fragment, so the
+// terms are re-matched against the description on its own.
+func displayIndexes(b bookmark, terms []string) []int {
+	text := strings.ToLower(b.displayText())
+	var out []int
+	for _, term := range terms {
+		if ms := fuzzy.Find(term, []string{text}); len(ms) > 0 {
+			out = append(out, ms[0].MatchedIndexes...)
 		}
 	}
 	return out
@@ -403,7 +393,7 @@ func main() {
 }
 
 // initialQuery prefills the search box from the command line. A leading
-// command keyword stands alone: "bm lto nginx" searches for "lto", and the
+// command keyword stands alone: "bm dvl web" searches for "dvl", and the
 // service name is retyped at the parameter prompt.
 func initialQuery(bookmarks []bookmark, args []string) string {
 	if len(args) == 0 {

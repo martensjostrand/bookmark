@@ -11,9 +11,9 @@ import (
 )
 
 var tuiBookmarks = []bookmark{
-	{command: "lt", url: "https://logs.example.com/test?s={service}", description: "logs test alpha cloud"},
-	{command: "lp", url: "https://logs.example.com/prod?s={service}", description: "logs prod alpha cloud"},
-	{command: "board", url: "https://tracker.example.com/board", description: "issue board"},
+	{command: "dv", url: "https://logs.example.com/test?s={service}", description: "logs test alpha cloud"},
+	{command: "pv", url: "https://logs.example.com/prod?s={service}", description: "logs prod alpha cloud"},
+	{command: "panel", url: "https://tracker.example.com/panel", description: "issue panel"},
 	{url: "https://example.com/one", description: "widget history prod"},
 	{url: "https://example.com/two", description: "widget history test"},
 }
@@ -65,12 +65,12 @@ func TestTUIFiltersAsYouType(t *testing.T) {
 }
 
 func TestTUIPrefillsQuery(t *testing.T) {
-	m := initialModel(tuiBookmarks, "board")
-	if m.input.Value() != "board" {
-		t.Errorf("input is %q, want \"board\"", m.input.Value())
+	m := initialModel(tuiBookmarks, "panel")
+	if m.input.Value() != "panel" {
+		t.Errorf("input is %q, want \"panel\"", m.input.Value())
 	}
-	if len(m.results) == 0 || m.results[0].bookmark.command != "board" {
-		t.Errorf("expected !board ranked first, got %+v", descriptions(m.results))
+	if len(m.results) == 0 || m.results[0].bookmark.command != "panel" {
+		t.Errorf("expected !panel ranked first, got %+v", descriptions(m.results))
 	}
 }
 
@@ -126,10 +126,10 @@ func TestTUICursorResetsWhenQueryChanges(t *testing.T) {
 }
 
 func TestTUIEnterOpensPlainBookmark(t *testing.T) {
-	m := initialModel(tuiBookmarks, "issue board")
+	m := initialModel(tuiBookmarks, "issue panel")
 	m, cmd := send(t, m, tea.KeyMsg{Type: tea.KeyEnter})
 
-	if m.chosen != "https://tracker.example.com/board" {
+	if m.chosen != "https://tracker.example.com/panel" {
 		t.Errorf("chosen is %q", m.chosen)
 	}
 	if !isQuit(cmd) {
@@ -138,7 +138,7 @@ func TestTUIEnterOpensPlainBookmark(t *testing.T) {
 }
 
 func TestTUIEnterOnParameterBookmarkPrompts(t *testing.T) {
-	m := initialModel(tuiBookmarks, "lp")
+	m := initialModel(tuiBookmarks, "pv")
 	m, _ = send(t, m, tea.KeyMsg{Type: tea.KeyEnter})
 
 	if m.stage != stageParam {
@@ -151,10 +151,10 @@ func TestTUIEnterOnParameterBookmarkPrompts(t *testing.T) {
 		t.Errorf("chosen set too early: %q", m.chosen)
 	}
 
-	m = typeText(t, m, "nginx")
+	m = typeText(t, m, "web")
 	m, cmd := send(t, m, tea.KeyMsg{Type: tea.KeyEnter})
 
-	want := "https://logs.example.com/prod?s=nginx"
+	want := "https://logs.example.com/prod?s=web"
 	if m.chosen != want {
 		t.Errorf("chosen is %q, want %q", m.chosen, want)
 	}
@@ -164,15 +164,15 @@ func TestTUIEnterOnParameterBookmarkPrompts(t *testing.T) {
 }
 
 func TestTUIEscFromParameterReturnsToSearch(t *testing.T) {
-	m := initialModel(tuiBookmarks, "lp")
+	m := initialModel(tuiBookmarks, "pv")
 	m, _ = send(t, m, tea.KeyMsg{Type: tea.KeyEnter})
 	m, _ = send(t, m, tea.KeyMsg{Type: tea.KeyEsc})
 
 	if m.stage != stageSearch {
 		t.Error("expected to be back at the search stage")
 	}
-	if m.input.Value() != "lp" {
-		t.Errorf("query is %q, want it preserved as \"lp\"", m.input.Value())
+	if m.input.Value() != "pv" {
+		t.Errorf("query is %q, want it preserved as \"pv\"", m.input.Value())
 	}
 	if m.chosen != "" {
 		t.Errorf("chosen should be empty, got %q", m.chosen)
@@ -317,7 +317,7 @@ func TestMatchedCharactersAreColoured(t *testing.T) {
 }
 
 func TestParamStageShowsSelection(t *testing.T) {
-	m := initialModel(tuiBookmarks, "lp")
+	m := initialModel(tuiBookmarks, "pv")
 	m, _ = send(t, m, tea.WindowSizeMsg{Width: 60, Height: 12})
 	selected := m.results[m.cursor].bookmark
 	m, _ = send(t, m, tea.KeyMsg{Type: tea.KeyEnter})
@@ -343,7 +343,7 @@ func TestParamStageShowsSelection(t *testing.T) {
 func TestParamStageRowMatchesListRow(t *testing.T) {
 	// The row must render identically either side of the transition, so the
 	// list looks like it collapses onto the selection.
-	m := initialModel(tuiBookmarks, "lp")
+	m := initialModel(tuiBookmarks, "pv")
 	m, _ = send(t, m, tea.WindowSizeMsg{Width: 60, Height: 12})
 	before := m.resultRow(m.cursor)
 
